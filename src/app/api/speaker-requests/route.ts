@@ -1,0 +1,193 @@
+import { NextRequest, NextResponse } from "next/server";
+import { getSupabaseServer } from "@/lib/supabase/server";
+import { raiseHandSchema, handleRequestSchema } from "@/lib/validators";
+import { RoomServiceClient } from "livekit-server-sdk";
+import { nanoid } from "nanoid";
+
+const livekitUrl = process.env.NEXT_PUBLIC_LIVEKIT_URL;
+const apiKey = process.env.LIVEKIT_API_KEY;
+const apiSecret = process.env.LIVEKIT_API_SECRET;
+
+// Helper to get LiveKit RoomServiceClient
+function getRoomServiceClient() {
+  if (!livekitUrl || !apiKey || !apiSecret) {
+    throw new Error("LiveKit credentials not configured.");
+  }
+  // Convert ws/wss to http/https for RoomServiceClient
+  const httpUrl = livekitUrl.replace(/^ws/, "http");
+  return new RoomServiceClient(httpUrl, apiKey, apiSecret);
+}
+
+// POST /api/speaker-requests - Raise hand (request speaker access)
+export async function POST(request: NextRequest) {
+  try {
+    const body = await request.json();
+    
+    // Validate request
+    const validation = raiseHandSchema.safeParse(body);
+    if (!validation.success) {
+      return NextResponse.json(
+        { error: validation.error.issues[0]?.message || "Invalid payload" },
+        { status: 400 }
+      );
+    }
+
+    const { room_id, guest_id, name, emoji } = validation.data;
+    const supabase = getSupabaseServer();
+
+    // Check if a pending request already exists
+    const { data: existing } = await supabase
+      .from("speaker_requests")
+      .select("id")
+      .eq("room_id", room_id)
+      .eq("guest_id", guest_id)
+      .eq("status", "pending")
+      .maybeSingle();
+
+    if (existing) {
+      return NextResponse.json({ success: true, message: "Hand already raised" });
+    }
+
+    // Insert speaker request
+    const newRequest = {
+      id: `req_${nanoid(12)}`,
+      room_id,
+      guest_id,
+      name,
+      emoji,
+      status: "pending",
+    };
+
+    const { error: insertError } = await supabase
+      .from("speaker_requests")
+      .insert(newRequest);
+
+    if (insertError) {
+      return NextResponse.json({ error: insertError.message }, { status: 500 });
+    }
+
+    return NextResponse.json(newRequest, { status: 201 });
+  } catch (error: any) {
+    return NextResponse.json({ error: error.message || "Server error" }, { status: 500 });
+  }
+}
+
+// PATCH /api/speaker-requests - Approve or Reject a raise-hand request (Host/Mod only)
+export async function PATCH(request: NextRequest) {
+  try {
+    const body = await request.json();
+    const guestId = request.headers.get("x-guest-id");
+
+    if (!guestId) {
+      return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+    }
+
+    // Validate request
+    const validation = handleRequestSchema.safeParse(body);
+    if (!validation.success) {
+      return NextResponse.json(
+        { error: validation.error.issues[0]?.message || "Invalid payload" },
+        { status: 400 }
+      );
+    }
+
+    const { request_id, room_id: bodyRoomId, guest_id: bodyGuestId, status } = validation.data;
+    const supabase = getSupabaseServer();
+
+    // 1. Fetch the request details
+    let dbQuery = supabase.from("speaker_requests").select("*");
+    if (request_id) {
+      dbQuery = dbQuery.eq("id", request_id);
+    } else if (bodyRoomId && bodyGuestId) {
+      dbQuery = dbQuery.eq("room_id", bodyRoomId).eq("guest_id", bodyGuestId).eq("status", "pending");
+    } else {
+      return NextResponse.json({ error: "Missing lookup identifier (request_id or room_id+guest_id)" }, { status: 400 });
+    }
+
+    const { data: speakerRequest, error: fetchReqError } = await dbQuery.maybeSingle();
+
+    if (fetchReqError || !speakerRequest) {
+      return NextResponse.json({ error: "Speaker request not found" }, { status: 404 });
+    }
+
+    const { id: dbRequestId, room_id, guest_id: requesterGuestId, name, emoji } = speakerRequest;
+
+    // 2. Verify that the user handling this is the room host or moderator
+    const { data: room, error: roomError } = await supabase
+      .from("rooms")
+      .select("host_id")
+      .eq("id", room_id)
+      .single();
+
+    if (roomError || !room) {
+      return NextResponse.json({ error: "Room not found" }, { status: 404 });
+    }
+
+    const { data: handlerParticipant } = await supabase
+      .from("participants")
+      .select("role")
+      .eq("room_id", room_id)
+      .eq("guest_id", guestId)
+      .maybeSingle();
+
+    const isAuthorized = 
+      room.host_id === guestId || 
+      (handlerParticipant && (handlerParticipant.role === "host" || handlerParticipant.role === "moderator"));
+
+    if (!isAuthorized) {
+      return NextResponse.json({ error: "Forbidden: Unauthorized to handle speaker requests" }, { status: 403 });
+    }
+
+    // 3. Update the request status
+    const { error: updateReqError } = await supabase
+      .from("speaker_requests")
+      .update({ status })
+      .eq("id", dbRequestId);
+
+    if (updateReqError) {
+      return NextResponse.json({ error: updateReqError.message }, { status: 500 });
+    }
+
+    if (status === "approved") {
+      // 4. Update the participant's role in the DB to "speaker"
+      const { error: updatePartError } = await supabase
+        .from("participants")
+        .update({ role: "speaker" })
+        .eq("room_id", room_id)
+        .eq("guest_id", requesterGuestId);
+
+      if (updatePartError) {
+        return NextResponse.json({ error: updatePartError.message }, { status: 500 });
+      }
+
+      // 5. Update LiveKit permissions using RoomServiceClient to enable canPublish: true
+      try {
+        const roomServiceClient = getRoomServiceClient();
+        await roomServiceClient.updateParticipant(room_id, requesterGuestId, {
+          permission: {
+            canPublish: true,
+            canSubscribe: true,
+            canPublishData: true,
+          },
+          metadata: JSON.stringify({ emoji, role: "speaker" }), // Sync metadata role
+        });
+      } catch (lkError: any) {
+        console.error("Failed to update LiveKit participant permissions:", lkError);
+        // Note: We don't fail the whole request because DB is in-sync and user can rejoin with new role, but logging is good
+      }
+    }
+
+    // If rejected, we simply leave it in DB as rejected or we delete it. Let's delete it so it clears out.
+    if (status === "rejected") {
+      await supabase.from("speaker_requests").delete().eq("id", dbRequestId);
+    } else {
+      // Approved requests can also be deleted from the list to clean it up
+      await supabase.from("speaker_requests").delete().eq("id", dbRequestId);
+    }
+
+    return NextResponse.json({ success: true, status });
+  } catch (error: any) {
+    console.error("Speaker request handle error:", error);
+    return NextResponse.json({ error: error.message || "Server error" }, { status: 500 });
+  }
+}
