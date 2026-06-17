@@ -17,6 +17,7 @@ interface SpeakerGridProps {
   userRole?: string;
   hasHandRaised?: boolean;
   onHandRaiseToggle?: () => void;
+  maxSeats?: number;
 }
 
 export function SpeakerGrid({
@@ -29,6 +30,7 @@ export function SpeakerGrid({
   userRole = "listener",
   hasHandRaised = false,
   onHandRaiseToggle,
+  maxSeats = 8,
 }: SpeakerGridProps) {
   const [isMobile, setIsMobile] = useState(false);
 
@@ -58,8 +60,8 @@ export function SpeakerGrid({
   const nonHosts = speakers.filter((s) => getRole(s) !== "host");
 
   if (isMobile) {
-    // Mobile layout: Fixed 8-seat grid (2 rows of 4 seats)
-    const totalSeats = 8;
+    // Mobile layout: Dynamic seat grid
+    const totalSeats = maxSeats;
     const seats = Array.from({ length: totalSeats }, (_, i) => {
       if (i === 0) return host || null;
       return nonHosts[i - 1] || null;
@@ -124,7 +126,7 @@ export function SpeakerGrid({
   return (
     <div className="space-y-3">
       <h3 className="text-xs font-bold text-muted-foreground uppercase tracking-wider">
-        Speakers ({speakers.length})
+        Speakers ({speakers.length} / {maxSeats})
       </h3>
 
       <div className="grid grid-cols-3 gap-3 sm:grid-cols-4 md:grid-cols-5 lg:grid-cols-6 max-h-[360px] overflow-y-auto pr-1">

@@ -1,6 +1,6 @@
 "use client";
 
-import { Mic, MicOff, MessageSquare, Hand, LogOut, ShieldAlert, Award } from "lucide-react";
+import { Mic, MicOff, MessageSquare, Hand, LogOut, ShieldAlert, Award, Users } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 
@@ -17,6 +17,8 @@ interface StageControlsProps {
   onLeave: () => void;
   onEndRoom: () => void;
   isEndingRoom?: boolean;
+  maxSeats?: number;
+  onOpenCapacity?: () => void;
 }
 
 export function StageControls({
@@ -32,6 +34,8 @@ export function StageControls({
   onLeave,
   onEndRoom,
   isEndingRoom = false,
+  maxSeats = 8,
+  onOpenCapacity,
 }: StageControlsProps) {
   const isSpeaker = role === "host" || role === "moderator" || role === "speaker";
   const isHost = role === "host";
@@ -84,6 +88,18 @@ export function StageControls({
                 {pendingRequestsCount}
               </span>
             )}
+          </Button>
+        )}
+
+        {/* Extend Capacity Button (Host only) */}
+        {role === "host" && onOpenCapacity && (
+          <Button
+            onClick={onOpenCapacity}
+            variant="outline"
+            className="h-11 px-4 rounded-xl border border-white/5 bg-white/5 text-foreground hover:bg-white/10 active-bounce flex items-center gap-2"
+          >
+            <Users className="h-4.5 w-4.5 text-violet-400" />
+            <span>Seats ({maxSeats})</span>
           </Button>
         )}
       </div>

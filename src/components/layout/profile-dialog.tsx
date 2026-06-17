@@ -55,7 +55,7 @@ export function ProfileDialog({ isOpen, onOpenChange }: ProfileDialogProps) {
 
   return (
     <Dialog open={isOpen} onOpenChange={onOpenChange}>
-      <DialogContent className="glass-panel border-white/10 text-foreground w-[92vw] sm:max-w-sm md:max-w-md lg:max-w-lg rounded-2xl p-5 sm:p-6">
+      <DialogContent className="glass-panel border-white/10 text-foreground w-[92vw] sm:max-w-sm md:max-w-md lg:max-w-lg rounded-2xl p-5 sm:p-6 max-h-[85dvh] overflow-y-auto">
         <DialogHeader>
           <DialogTitle className="text-xl font-bold bg-gradient-to-r from-violet-400 to-cyan-400 bg-clip-text text-transparent">
             Edit Profile

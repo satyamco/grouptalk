@@ -37,6 +37,9 @@ export interface Room {
   is_private: boolean;
   is_active: boolean;
   created_at: string;
+  max_seats?: number;
+  last_activity_at?: string;
+  host_last_seen_at?: string;
 }
 
 export interface RoomWithCounts extends Room {
@@ -132,4 +135,5 @@ export type DataChannelEvent =
   | { type: "role-change"; data: { guestId: string; newRole: ParticipantRole } }
   | { type: "participant-removed"; data: { guestId: string } }
   | { type: "reaction"; data: { emoji: string; senderName: string } }
-  | { type: "room-ended"; data: { hostName: string } };
+  | { type: "room-ended"; data: { hostName: string } }
+  | { type: "capacity-updated"; data: { maxSeats: number } };

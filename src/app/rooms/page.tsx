@@ -11,6 +11,7 @@ import { Plus, RefreshCw, Radio } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { toast } from "sonner";
 import { useRouter } from "next/navigation";
+import { usePWA } from "@/hooks/use-pwa";
 import dynamic from "next/dynamic";
 
 const CreateRoomForm = dynamic(
@@ -25,6 +26,26 @@ export default function RoomsDiscoveryPage() {
   const [refreshing, setRefreshing] = useState(false);
   const [selectedCategory, setSelectedCategory] = useState("all");
   const [isCreateOpen, setIsCreateOpen] = useState(false);
+
+  const { showInstallPrompt, isIOS, isStandalone, triggerInstall } = usePWA();
+  const [bannerDismissed, setBannerDismissed] = useState(true);
+
+  useEffect(() => {
+    const dismissed = localStorage.getItem("voxroom-pwa-dismissed") === "true";
+    setBannerDismissed(dismissed);
+  }, []);
+
+  const handleDismissBanner = () => {
+    localStorage.setItem("voxroom-pwa-dismissed", "true");
+    setBannerDismissed(true);
+  };
+
+  const handleInstallClick = async () => {
+    const installed = await triggerInstall();
+    if (installed) {
+      handleDismissBanner();
+    }
+  };
 
   // Fetch rooms list from API
   const fetchRooms = useCallback(async (isRefresh = false) => {
@@ -68,6 +89,40 @@ export default function RoomsDiscoveryPage() {
   return (
     <AppShell activeTab="discover" onCreateClick={() => setIsCreateOpen(true)}>
       <div className="space-y-6">
+        {/* PWA Install Banner */}
+        {!isStandalone && !bannerDismissed && (showInstallPrompt || isIOS) && (
+          <div className="glass-panel border border-violet-500/25 bg-gradient-to-r from-violet-950/30 to-cyan-950/20 rounded-2xl p-4 flex flex-col sm:flex-row sm:items-center justify-between gap-4 shadow-xl animate-in fade-in slide-in-from-top-5 duration-300">
+            <div className="flex gap-3 text-left">
+              <span className="text-2xl select-none hidden sm:inline">📱</span>
+              <div className="space-y-0.5">
+                <h4 className="text-xs font-black uppercase tracking-wider text-violet-400">Install VoxRoom App</h4>
+                <p className="text-xs text-zinc-300 font-medium">
+                  {isIOS 
+                    ? "Add VoxRoom to your Home Screen: tap the Share icon (📤) in Safari and select 'Add to Home Screen'."
+                    : "Add VoxRoom to your Home Screen for a native app-like experience and direct audio access!"
+                  }
+                </p>
+              </div>
+            </div>
+            <div className="flex items-center gap-2 shrink-0 self-end sm:self-auto">
+              <button
+                onClick={handleDismissBanner}
+                className="h-9 px-3 rounded-xl text-xs font-bold bg-white/5 hover:bg-white/10 text-muted-foreground border border-white/5 active-bounce transition-all duration-200 cursor-pointer"
+              >
+                Maybe Later
+              </button>
+              {showInstallPrompt && (
+                <button
+                  onClick={handleInstallClick}
+                  className="h-9 px-4 rounded-xl text-xs font-bold bg-gradient-to-r from-violet-600 to-cyan-600 hover:from-violet-500 hover:to-cyan-500 text-white shadow-md shadow-violet-600/25 active-bounce transition-all duration-200 cursor-pointer"
+                >
+                  Add to Home Screen
+                </button>
+              )}
+            </div>
+          </div>
+        )}
+
         {/* Top welcome & action header */}
         <div className="flex items-center justify-between">
           <div>
@@ -160,7 +215,7 @@ export default function RoomsDiscoveryPage() {
 
       {/* Create Room Dialog */}
       <Dialog open={isCreateOpen} onOpenChange={setIsCreateOpen}>
-        <DialogContent className="glass-panel border-white/10 text-foreground w-[92vw] sm:max-w-sm md:max-w-md lg:max-w-lg rounded-2xl">
+        <DialogContent className="glass-panel border-white/10 text-foreground w-[92vw] sm:max-w-sm md:max-w-md lg:max-w-lg rounded-2xl max-h-[85dvh] overflow-y-auto">
           <DialogHeader>
             <DialogTitle className="text-xl font-bold bg-gradient-to-r from-violet-400 to-cyan-400 bg-clip-text text-transparent">
               Create Voice Room

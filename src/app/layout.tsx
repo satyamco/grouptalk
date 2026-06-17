@@ -13,6 +13,11 @@ const inter = Inter({
 export const metadata: Metadata = {
   title: "VoxRoom — Frictionless Real-Time Social Audio",
   description: "Join voice conversations instantly with no account required. Create rooms, participate anonymously, and chat live in real-time.",
+  appleWebApp: {
+    capable: true,
+    title: "VoxRoom",
+    statusBarStyle: "black-translucent",
+  },
 };
 
 export const viewport: Viewport = {

@@ -13,6 +13,7 @@ interface UseChatProps {
   onRequestsChanged?: () => void;
   onHandRaiseReceived?: (guestId: string, name: string, emoji: string) => void;
   onRoomEnded?: (hostName: string) => void;
+  onCapacityUpdated?: (maxSeats: number) => void;
 }
 
 export function useChat({
@@ -23,6 +24,7 @@ export function useChat({
   onRequestsChanged,
   onHandRaiseReceived,
   onRoomEnded,
+  onCapacityUpdated,
 }: UseChatProps) {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const { localParticipant } = useLocalParticipant();
@@ -76,6 +78,12 @@ export function useChat({
         case "room-ended":
           if (onRoomEnded) {
             onRoomEnded(event.data.hostName);
+          }
+          break;
+
+        case "capacity-updated":
+          if (onCapacityUpdated) {
+            onCapacityUpdated(event.data.maxSeats);
           }
           break;
 
@@ -215,6 +223,29 @@ export function useChat({
     [send, encoder]
   );
 
+  // Broadcast capacity change (used by host)
+  const broadcastCapacityChange = useCallback(
+    async (maxSeats: number) => {
+      if (!send) return;
+
+      const event: DataChannelEvent = {
+        type: "capacity-updated",
+        data: {
+          maxSeats,
+        },
+      };
+
+      const payload = encoder.encode(JSON.stringify(event));
+
+      try {
+        await send(payload, { reliable: true });
+      } catch (error) {
+        console.error("Failed to broadcast capacity change:", error);
+      }
+    },
+    [send, encoder]
+  );
+
   return {
     messages,
     sendMessage,
@@ -222,5 +253,6 @@ export function useChat({
     broadcastParticipantRemoved,
     broadcastHandRaise,
     broadcastRoomEnded,
+    broadcastCapacityChange,
   };
 }

@@ -15,6 +15,7 @@ import { ChatPanel } from "../chat/chat-panel";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription } from "@/components/ui/dialog";
 import { Sheet, SheetContent, SheetHeader, SheetTitle, SheetTrigger } from "@/components/ui/sheet";
 import { Drawer, DrawerContent, DrawerTitle, DrawerDescription } from "@/components/ui/drawer";
+import { Button } from "@/components/ui/button";
 import { CATEGORY_META } from "@/lib/constants";
 import { ShieldAlert, Users, MessageSquare, Award, ArrowLeft, Mic, MicOff, Volume2, Send, LayoutGrid, LogOut } from "lucide-react";
 import { useRouter } from "next/navigation";
@@ -57,6 +58,22 @@ function VoiceStageContent({
     return () => window.removeEventListener("resize", checkMobile);
   }, []);
 
+  // Lock body scroll on mobile to prevent browser rubber-banding/chrome hiding
+  useEffect(() => {
+    if (isMobile) {
+      document.body.style.overflow = "hidden";
+      document.body.style.position = "fixed";
+      document.body.style.width = "100%";
+      document.body.style.height = "100%";
+    }
+    return () => {
+      document.body.style.overflow = "";
+      document.body.style.position = "";
+      document.body.style.width = "";
+      document.body.style.height = "";
+    };
+  }, [isMobile]);
+
   // 1. LiveKit Voice hook
   const {
     room,
@@ -73,6 +90,12 @@ function VoiceStageContent({
   const [isRequestsOpen, setIsRequestsOpen] = useState(false);
   const [hasHandRaised, setHasHandRaised] = useState(false);
   
+  // Dynamic seat capacity state
+  const [maxSeats, setMaxSeats] = useState<number>(roomData.max_seats || 8);
+  const [isCapacityOpen, setIsCapacityOpen] = useState(false);
+  const [newCapacity, setNewCapacity] = useState<number>(maxSeats);
+  const [isUpdatingCapacity, setIsUpdatingCapacity] = useState(false);
+
   // State for UI toggles
   const [isChatOpen, setIsChatOpen] = useState(false);
   const [unreadCount, setUnreadCount] = useState(0);
@@ -203,9 +226,15 @@ function VoiceStageContent({
     broadcastParticipantRemoved,
     broadcastHandRaise,
     broadcastRoomEnded,
+    broadcastCapacityChange,
   } = useChat({
     senderName: userParticipant.name,
     senderEmoji: userParticipant.emoji,
+    onCapacityUpdated: (updatedMaxSeats) => {
+      setMaxSeats(updatedMaxSeats);
+      setNewCapacity(updatedMaxSeats);
+      toast.info(`Speaker capacity extended to ${updatedMaxSeats} seats!`);
+    },
     onRoleChanged: (targetGuestId, newRole) => {
       // If our own role changed
       if (targetGuestId === guestId) {
@@ -272,6 +301,44 @@ function VoiceStageContent({
   // Assign the ref so handleQuickAction can use it
   broadcastRoleChangeRef.current = broadcastRoleChange;
 
+  const handleUpdateCapacity = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (newCapacity < speakers.length) {
+      toast.error(`Cannot reduce capacity below current speaker count (${speakers.length})`);
+      return;
+    }
+    if (newCapacity > 20) {
+      toast.error("Maximum capacity is 20 seats.");
+      return;
+    }
+
+    setIsUpdatingCapacity(true);
+    try {
+      const res = await fetch(`/api/rooms/${roomId}`, {
+        method: "PATCH",
+        headers: {
+          "Content-Type": "application/json",
+          "x-guest-id": guestId || "",
+        },
+        body: JSON.stringify({ max_seats: newCapacity }),
+      });
+
+      const data = await res.json();
+      if (!res.ok) {
+        throw new Error(data.error || "Failed to update capacity");
+      }
+
+      setMaxSeats(newCapacity);
+      await broadcastCapacityChange(newCapacity);
+      toast.success(`Speaker capacity successfully updated to ${newCapacity} seats!`);
+      setIsCapacityOpen(false);
+    } catch (err: any) {
+      toast.error(err.message || "An error occurred");
+    } finally {
+      setIsUpdatingCapacity(false);
+    }
+  };
+
   // Auto-scroll mobile chat
   useEffect(() => {
     if (isMobile) {
@@ -336,6 +403,40 @@ function VoiceStageContent({
 
   // Pending request guest ids to show raised hand icons on listener grid
   const pendingGuestIds = useMemo(() => requests.map((r) => r.guest_id), [requests]);
+
+  // Keep a ref to speakers to prevent resetting the heartbeat interval
+  const speakersRef = useRef(speakers);
+  useEffect(() => {
+    speakersRef.current = speakers;
+  }, [speakers]);
+
+  // Heartbeat presence and activity tracker
+  useEffect(() => {
+    if (connectionState !== "connected") return;
+
+    const sendHeartbeat = async () => {
+      try {
+        const currentSpeakers = speakersRef.current;
+        const isAnyoneSpeaking = currentSpeakers.some(s => s.isMicrophoneEnabled && !s.isMuted);
+
+        await fetch(`/api/rooms/${roomId}/heartbeat`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            guestId,
+            role: userParticipant.role,
+            isSpeaking: isAnyoneSpeaking,
+          }),
+        });
+      } catch (err) {
+        console.error("Failed to send heartbeat:", err);
+      }
+    };
+
+    sendHeartbeat();
+    const interval = setInterval(sendHeartbeat, 30000);
+    return () => clearInterval(interval);
+  }, [roomId, guestId, userParticipant.role, connectionState]);
 
   // Mute a participant (Host only)
   const handleHostMute = async (targetParticipant: any) => {
@@ -484,7 +585,7 @@ function VoiceStageContent({
 
   if (isMobile) {
     return (
-      <div className="flex flex-col h-screen w-screen overflow-hidden bg-background relative select-none">
+      <div className="flex flex-col h-dvh w-full overflow-hidden bg-background relative select-none pb-safe pt-safe">
 
 
         {/* Room Header bar */}
@@ -529,6 +630,7 @@ function VoiceStageContent({
               userRole={userParticipant.role}
               hasHandRaised={hasHandRaised}
               onHandRaiseToggle={handleHandRaiseToggle}
+              maxSeats={maxSeats}
             />
           </div>
 
@@ -650,7 +752,7 @@ function VoiceStageContent({
 
         {/* Host requests management Modal (Dialog) */}
         <Dialog open={isRequestsOpen} onOpenChange={setIsRequestsOpen}>
-          <DialogContent className="glass-panel border-white/10 text-foreground w-[92vw] sm:max-w-sm md:max-w-md lg:max-w-lg rounded-2xl">
+          <DialogContent className="glass-panel border-white/10 text-foreground w-[92vw] sm:max-w-sm md:max-w-md lg:max-w-lg rounded-2xl max-h-[85dvh] overflow-y-auto">
             <DialogHeader>
               <DialogTitle className="text-xl font-bold bg-gradient-to-r from-violet-400 to-cyan-400 bg-clip-text text-transparent">
                 Raise Hands
@@ -669,6 +771,60 @@ function VoiceStageContent({
                 }}
               />
             )}
+          </DialogContent>
+        </Dialog>
+
+        {/* Host extend seats Modal (Dialog) */}
+        <Dialog open={isCapacityOpen} onOpenChange={setIsCapacityOpen}>
+          <DialogContent className="glass-panel border-white/10 text-foreground w-[92vw] sm:max-w-sm rounded-2xl max-h-[85dvh] overflow-y-auto">
+            <DialogHeader>
+              <DialogTitle className="text-xl font-bold bg-gradient-to-r from-violet-400 to-cyan-400 bg-clip-text text-transparent">
+                Extend Speaker Seats
+              </DialogTitle>
+              <DialogDescription className="text-xs text-zinc-400 font-medium">
+                Increase the speaker capacity of this live room (max 20 seats).
+              </DialogDescription>
+            </DialogHeader>
+            <form onSubmit={handleUpdateCapacity} className="space-y-4 pt-3">
+              <div className="space-y-2">
+                <label className="text-xs font-semibold text-muted-foreground uppercase tracking-wider block">
+                  Number of Seats
+                </label>
+                <div className="flex items-center gap-4">
+                  <input
+                    type="range"
+                    min={Math.max(2, speakers.length)}
+                    max={20}
+                    value={newCapacity}
+                    onChange={(e) => setNewCapacity(parseInt(e.target.value))}
+                    className="flex-1 accent-violet-500 cursor-pointer"
+                  />
+                  <span className="text-lg font-black text-white shrink-0 bg-white/5 border border-white/10 px-3 py-1 rounded-xl w-12 text-center">
+                    {newCapacity}
+                  </span>
+                </div>
+                <p className="text-[10px] text-zinc-500 font-medium">
+                  Current speakers: {speakers.length}. Max allowed: 20.
+                </p>
+              </div>
+              <div className="flex gap-2.5 pt-2">
+                <Button
+                  type="button"
+                  variant="ghost"
+                  onClick={() => setIsCapacityOpen(false)}
+                  className="flex-1 rounded-xl h-11"
+                >
+                  Cancel
+                </Button>
+                <Button
+                  type="submit"
+                  disabled={isUpdatingCapacity}
+                  className="flex-1 bg-gradient-to-r from-violet-600 to-cyan-600 hover:from-violet-500 hover:to-cyan-500 text-white font-bold rounded-xl h-11 shadow-lg shadow-violet-500/20 active-bounce"
+                >
+                  {isUpdatingCapacity ? "Updating..." : "Update"}
+                </Button>
+              </div>
+            </form>
           </DialogContent>
         </Dialog>
       </div>
@@ -725,6 +881,7 @@ function VoiceStageContent({
             userRole={userParticipant.role}
             hasHandRaised={hasHandRaised}
             onHandRaiseToggle={handleHandRaiseToggle}
+            maxSeats={maxSeats}
           />
 
           {/* Separator line */}
@@ -751,6 +908,11 @@ function VoiceStageContent({
           onOpenRequests={() => setIsRequestsOpen(true)}
           onLeave={handleLeave}
           onEndRoom={handleEndRoom}
+          maxSeats={maxSeats}
+          onOpenCapacity={() => {
+            setNewCapacity(maxSeats);
+            setIsCapacityOpen(true);
+          }}
         />
       </div>
 
@@ -778,7 +940,7 @@ function VoiceStageContent({
 
       {/* 4. Host requests management Modal (Dialog) */}
       <Dialog open={isRequestsOpen} onOpenChange={setIsRequestsOpen}>
-        <DialogContent className="glass-panel border-white/10 text-foreground w-[92vw] sm:max-w-sm md:max-w-md lg:max-w-lg rounded-2xl">
+        <DialogContent className="glass-panel border-white/10 text-foreground w-[92vw] sm:max-w-sm md:max-w-md lg:max-w-lg rounded-2xl max-h-[85dvh] overflow-y-auto">
           <DialogHeader>
             <DialogTitle className="text-xl font-bold bg-gradient-to-r from-violet-400 to-cyan-400 bg-clip-text text-transparent">
               Raise Hands
@@ -798,6 +960,60 @@ function VoiceStageContent({
               }}
             />
           )}
+        </DialogContent>
+      </Dialog>
+
+      {/* 5. Host extend seats Modal (Dialog) */}
+      <Dialog open={isCapacityOpen} onOpenChange={setIsCapacityOpen}>
+        <DialogContent className="glass-panel border-white/10 text-foreground w-[92vw] sm:max-w-sm rounded-2xl max-h-[85dvh] overflow-y-auto">
+          <DialogHeader>
+            <DialogTitle className="text-xl font-bold bg-gradient-to-r from-violet-400 to-cyan-400 bg-clip-text text-transparent">
+              Extend Speaker Seats
+            </DialogTitle>
+            <DialogDescription className="text-xs text-zinc-400 font-medium">
+              Increase the speaker capacity of this live room (max 20 seats).
+            </DialogDescription>
+          </DialogHeader>
+          <form onSubmit={handleUpdateCapacity} className="space-y-4 pt-3">
+            <div className="space-y-2">
+              <label className="text-xs font-semibold text-muted-foreground uppercase tracking-wider block">
+                Number of Seats
+              </label>
+              <div className="flex items-center gap-4">
+                <input
+                  type="range"
+                  min={Math.max(2, speakers.length)}
+                  max={20}
+                  value={newCapacity}
+                  onChange={(e) => setNewCapacity(parseInt(e.target.value))}
+                  className="flex-1 accent-violet-500 cursor-pointer"
+                />
+                <span className="text-lg font-black text-white shrink-0 bg-white/5 border border-white/10 px-3 py-1 rounded-xl w-12 text-center">
+                  {newCapacity}
+                </span>
+              </div>
+              <p className="text-[10px] text-zinc-500 font-medium">
+                Current speakers: {speakers.length}. Max allowed: 20.
+              </p>
+            </div>
+            <div className="flex gap-2.5 pt-2">
+              <Button
+                type="button"
+                variant="ghost"
+                onClick={() => setIsCapacityOpen(false)}
+                className="flex-1 rounded-xl h-11"
+              >
+                Cancel
+              </Button>
+              <Button
+                type="submit"
+                disabled={isUpdatingCapacity}
+                className="flex-1 bg-gradient-to-r from-violet-600 to-cyan-600 hover:from-violet-500 hover:to-cyan-500 text-white font-bold rounded-xl h-11 shadow-lg shadow-violet-500/20 active-bounce"
+              >
+                {isUpdatingCapacity ? "Updating..." : "Update"}
+              </Button>
+            </div>
+          </form>
         </DialogContent>
       </Dialog>
 

@@ -115,7 +115,7 @@ export async function PATCH(request: NextRequest) {
     // 2. Verify that the user handling this is the room host or moderator
     const { data: room, error: roomError } = await supabase
       .from("rooms")
-      .select("host_id")
+      .select("host_id, max_seats")
       .eq("id", room_id)
       .single();
 
@@ -149,6 +149,27 @@ export async function PATCH(request: NextRequest) {
     }
 
     if (status === "approved") {
+      // Check if room has reached its speaker capacity
+      const maxSeats = room.max_seats || 8;
+
+      const { data: speakers, error: speakersError } = await supabase
+        .from("participants")
+        .select("id")
+        .eq("room_id", room_id)
+        .in("role", ["host", "moderator", "speaker"]);
+
+      if (speakersError) {
+        return NextResponse.json({ error: speakersError.message }, { status: 500 });
+      }
+
+      const currentSpeakersCount = speakers?.length || 0;
+      if (currentSpeakersCount >= maxSeats) {
+        return NextResponse.json(
+          { error: `The room has reached its maximum speaker capacity of ${maxSeats} seats. Please extend the capacity to allow more speakers.` },
+          { status: 400 }
+        );
+      }
+
       // 4. Update the participant's role in the DB to "speaker"
       const { error: updatePartError } = await supabase
         .from("participants")

@@ -111,3 +111,79 @@ export async function DELETE(
     return NextResponse.json({ error: error.message || "Server error" }, { status: 500 });
   }
 }
+
+// PATCH /api/rooms/[roomId] - Update room settings (e.g., max_seats). Requires verification that sender is the host.
+export async function PATCH(
+  request: NextRequest,
+  context: { params: Promise<{ roomId: string }> }
+) {
+  try {
+    const { roomId } = await context.params;
+    const guestId = request.headers.get("x-guest-id");
+    const body = await request.json();
+    const { max_seats } = body;
+
+    if (!guestId) {
+      return NextResponse.json({ error: "Unauthorized: Missing guest identification" }, { status: 401 });
+    }
+
+    if (max_seats === undefined) {
+      return NextResponse.json({ error: "Missing max_seats parameter" }, { status: 400 });
+    }
+
+    const maxSeatsInt = parseInt(max_seats, 10);
+    if (isNaN(maxSeatsInt) || maxSeatsInt < 2 || maxSeatsInt > 20) {
+      return NextResponse.json({ error: "Capacity must be a number between 2 and 20" }, { status: 400 });
+    }
+
+    const supabase = getSupabaseServer();
+
+    // Verify room exists and the requester is the host
+    const { data: room, error: roomError } = await supabase
+      .from("rooms")
+      .select("host_id")
+      .eq("id", roomId)
+      .single();
+
+    if (roomError || !room) {
+      return NextResponse.json({ error: "Room not found" }, { status: 404 });
+    }
+
+    if (room.host_id !== guestId) {
+      return NextResponse.json({ error: "Forbidden: Only the room host can update capacity" }, { status: 403 });
+    }
+
+    // Get current speaker count to prevent shrinking below it
+    const { data: speakers, error: speakersError } = await supabase
+      .from("participants")
+      .select("id")
+      .eq("room_id", roomId)
+      .in("role", ["host", "moderator", "speaker"]);
+
+    if (speakersError) {
+      return NextResponse.json({ error: speakersError.message }, { status: 500 });
+    }
+
+    const currentSpeakersCount = speakers?.length || 0;
+    if (maxSeatsInt < currentSpeakersCount) {
+      return NextResponse.json(
+        { error: `Cannot reduce capacity to ${maxSeatsInt} as there are already ${currentSpeakersCount} speakers on stage` },
+        { status: 400 }
+      );
+    }
+
+    // Update max_seats in DB
+    const { error: updateError } = await supabase
+      .from("rooms")
+      .update({ max_seats: maxSeatsInt })
+      .eq("id", roomId);
+
+    if (updateError) {
+      return NextResponse.json({ error: updateError.message }, { status: 500 });
+    }
+
+    return NextResponse.json({ success: true, max_seats: maxSeatsInt });
+  } catch (error: any) {
+    return NextResponse.json({ error: error.message || "Server error" }, { status: 500 });
+  }
+}
