@@ -1,10 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getSupabaseServer } from "@/lib/supabase/server";
-import { RoomServiceClient } from "livekit-server-sdk";
-
-const livekitUrl = process.env.NEXT_PUBLIC_LIVEKIT_URL;
-const apiKey = process.env.LIVEKIT_API_KEY;
-const apiSecret = process.env.LIVEKIT_API_SECRET;
+import { getRoomServiceClient } from "@/lib/room-cleanup";
 
 // GET /api/rooms/[roomId] - Fetch details of a single room, including current participants
 export async function GET(
@@ -30,6 +26,13 @@ export async function GET(
       return NextResponse.json({ error: "Room is no longer active" }, { status: 410 });
     }
 
+    // Retrieve in-memory capacity if DB column is missing or to override it
+    const { roomCapacityMap } = await import("@/lib/room-cleanup");
+    const memCapacity = roomCapacityMap.get(roomId);
+    if (room) {
+      room.max_seats = memCapacity !== undefined ? memCapacity : (room.max_seats || 8);
+    }
+
     // Fetch active participants in the room
     const { data: participants, error: partError } = await supabase
       .from("participants")
@@ -45,8 +48,9 @@ export async function GET(
       room,
       participants: participants || [],
     });
-  } catch (error: any) {
-    return NextResponse.json({ error: error.message || "Server error" }, { status: 500 });
+  } catch (error: unknown) {
+    const message = error instanceof Error ? error.message : "Server error";
+    return NextResponse.json({ error: message }, { status: 500 });
   }
 }
 
@@ -97,9 +101,8 @@ export async function DELETE(
 
     // Delete LiveKit Room Session
     try {
-      if (livekitUrl && apiKey && apiSecret) {
-        const httpUrl = livekitUrl.replace(/^ws/, "http");
-        const roomServiceClient = new RoomServiceClient(httpUrl, apiKey, apiSecret);
+      const roomServiceClient = getRoomServiceClient();
+      if (roomServiceClient) {
         await roomServiceClient.deleteRoom(roomId);
       }
     } catch (lkErr) {
@@ -107,8 +110,9 @@ export async function DELETE(
     }
 
     return NextResponse.json({ success: true, message: "Room ended successfully" });
-  } catch (error: any) {
-    return NextResponse.json({ error: error.message || "Server error" }, { status: 500 });
+  } catch (error: unknown) {
+    const message = error instanceof Error ? error.message : "Server error";
+    return NextResponse.json({ error: message }, { status: 500 });
   }
 }
 
@@ -132,8 +136,8 @@ export async function PATCH(
     }
 
     const maxSeatsInt = parseInt(max_seats, 10);
-    if (isNaN(maxSeatsInt) || maxSeatsInt < 2 || maxSeatsInt > 20) {
-      return NextResponse.json({ error: "Capacity must be a number between 2 and 20" }, { status: 400 });
+    if (isNaN(maxSeatsInt) || maxSeatsInt < 8 || maxSeatsInt > 16) {
+      return NextResponse.json({ error: "Capacity must be a number between 8 and 16" }, { status: 400 });
     }
 
     const supabase = getSupabaseServer();
@@ -179,11 +183,20 @@ export async function PATCH(
       .eq("id", roomId);
 
     if (updateError) {
-      return NextResponse.json({ error: updateError.message }, { status: 500 });
+      if (updateError.code === "42703" || updateError.code === "PGRST204") {
+        console.warn(`[PATCH /api/rooms/${roomId}] Column 'max_seats' does not exist in rooms table. Falling back to realtime/in-memory update.`);
+      } else {
+        return NextResponse.json({ error: updateError.message }, { status: 500 });
+      }
     }
 
+    // Save to in-memory capacity map (for missing DB column fallback)
+    const { roomCapacityMap } = await import("@/lib/room-cleanup");
+    roomCapacityMap.set(roomId, maxSeatsInt);
+
     return NextResponse.json({ success: true, max_seats: maxSeatsInt });
-  } catch (error: any) {
-    return NextResponse.json({ error: error.message || "Server error" }, { status: 500 });
+  } catch (error: unknown) {
+    const message = error instanceof Error ? error.message : "Server error";
+    return NextResponse.json({ error: message }, { status: 500 });
   }
 }

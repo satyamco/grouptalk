@@ -7,14 +7,19 @@ if (!supabaseUrl || !supabaseServiceKey) {
   console.warn("Warning: NEXT_PUBLIC_SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY is missing in your environment.");
 }
 
+let cachedServerClient: ReturnType<typeof createClient> | null = null;
+
 export function getSupabaseServer() {
-  return createClient(
-    supabaseUrl || "https://placeholder-project.supabase.co",
-    supabaseServiceKey || "placeholder-key",
-    {
-      auth: {
-        persistSession: false,
-      },
-    }
-  );
+  if (!cachedServerClient) {
+    cachedServerClient = createClient<any, any, any>(
+      supabaseUrl || "https://placeholder-project.supabase.co",
+      supabaseServiceKey || "placeholder-key",
+      {
+        auth: {
+          persistSession: false,
+        },
+      }
+    );
+  }
+  return cachedServerClient;
 }

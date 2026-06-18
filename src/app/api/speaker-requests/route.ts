@@ -67,8 +67,9 @@ export async function POST(request: NextRequest) {
     }
 
     return NextResponse.json(newRequest, { status: 201 });
-  } catch (error: any) {
-    return NextResponse.json({ error: error.message || "Server error" }, { status: 500 });
+  } catch (error: unknown) {
+    const errorMessage = error instanceof Error ? error.message : "Server error";
+    return NextResponse.json({ error: errorMessage }, { status: 500 });
   }
 }
 
@@ -110,16 +111,33 @@ export async function PATCH(request: NextRequest) {
       return NextResponse.json({ error: "Speaker request not found" }, { status: 404 });
     }
 
-    const { id: dbRequestId, room_id, guest_id: requesterGuestId, name, emoji } = speakerRequest;
+    const { id: dbRequestId, room_id, guest_id: requesterGuestId, emoji } = speakerRequest;
 
     // 2. Verify that the user handling this is the room host or moderator
-    const { data: room, error: roomError } = await supabase
+    let room: { host_id: string; max_seats?: number | null } | null = null;
+    let hasRoomError = false;
+
+    const queryResult = await supabase
       .from("rooms")
       .select("host_id, max_seats")
       .eq("id", room_id)
       .single();
 
-    if (roomError || !room) {
+    // Gracefully fall back if the max_seats column does not exist in the database (error codes 42703/PGRST204)
+    if (queryResult.error && (queryResult.error.code === "42703" || queryResult.error.code === "PGRST204")) {
+      const fallbackQuery = await supabase
+        .from("rooms")
+        .select("host_id")
+        .eq("id", room_id)
+        .single();
+      room = fallbackQuery.data;
+      hasRoomError = !!fallbackQuery.error;
+    } else {
+      room = queryResult.data;
+      hasRoomError = !!queryResult.error;
+    }
+
+    if (hasRoomError || !room) {
       return NextResponse.json({ error: "Room not found" }, { status: 404 });
     }
 
@@ -150,7 +168,9 @@ export async function PATCH(request: NextRequest) {
 
     if (status === "approved") {
       // Check if room has reached its speaker capacity
-      const maxSeats = room.max_seats || 8;
+      const { roomCapacityMap } = await import("@/lib/room-cleanup");
+      const memCapacity = roomCapacityMap.get(room_id);
+      const maxSeats = memCapacity !== undefined ? memCapacity : (room.max_seats || 8);
 
       const { data: speakers, error: speakersError } = await supabase
         .from("participants")
@@ -192,7 +212,7 @@ export async function PATCH(request: NextRequest) {
           },
           metadata: JSON.stringify({ emoji, role: "speaker" }), // Sync metadata role
         });
-      } catch (lkError: any) {
+      } catch (lkError: unknown) {
         console.error("Failed to update LiveKit participant permissions:", lkError);
         // Note: We don't fail the whole request because DB is in-sync and user can rejoin with new role, but logging is good
       }
@@ -207,8 +227,9 @@ export async function PATCH(request: NextRequest) {
     }
 
     return NextResponse.json({ success: true, status });
-  } catch (error: any) {
+  } catch (error: unknown) {
     console.error("Speaker request handle error:", error);
-    return NextResponse.json({ error: error.message || "Server error" }, { status: 500 });
+    const errorMessage = error instanceof Error ? error.message : "Server error";
+    return NextResponse.json({ error: errorMessage }, { status: 500 });
   }
 }

@@ -6,21 +6,24 @@ import { Room, Participant, ChatMessage, SpeakerRequest } from "@/types";
 import { useVoice } from "@/hooks/use-voice";
 import { useChat } from "@/hooks/use-chat";
 import { getGuestId } from "@/hooks/use-guest-id";
+import { useVoiceStore } from "@/hooks/use-voice-store";
 import { cn } from "@/lib/utils";
 import { SpeakerGrid } from "./speaker-grid";
 import { ListenerGrid } from "./listener-grid";
 import { StageControls } from "./stage-controls";
 import { HandRaisePanel } from "./hand-raise-panel";
 import { ChatPanel } from "../chat/chat-panel";
+import { HostTransferDialog } from "./host-transfer-dialog";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription } from "@/components/ui/dialog";
 import { Sheet, SheetContent, SheetHeader, SheetTitle, SheetTrigger } from "@/components/ui/sheet";
 import { Drawer, DrawerContent, DrawerTitle, DrawerDescription } from "@/components/ui/drawer";
 import { Button } from "@/components/ui/button";
 import { CATEGORY_META } from "@/lib/constants";
-import { ShieldAlert, Users, MessageSquare, Award, ArrowLeft, Mic, MicOff, Volume2, Send, LayoutGrid, LogOut } from "lucide-react";
+import { ShieldAlert, Users, MessageSquare, Award, ArrowLeft, Mic, MicOff, Volume2, Send, LayoutGrid, LogOut, Minimize2, Link } from "lucide-react";
 import { useRouter } from "next/navigation";
 import { toast } from "sonner";
 import { nanoid } from "nanoid";
+import { supabase } from "@/lib/supabase/client";
 
 export interface VoiceStageProps {
   token: string;
@@ -89,6 +92,7 @@ function VoiceStageContent({
   const [requests, setRequests] = useState<SpeakerRequest[]>([]);
   const [isRequestsOpen, setIsRequestsOpen] = useState(false);
   const [hasHandRaised, setHasHandRaised] = useState(false);
+  const [isTransferOpen, setIsTransferOpen] = useState(false);
   
   // Dynamic seat capacity state
   const [maxSeats, setMaxSeats] = useState<number>(roomData.max_seats || 8);
@@ -99,10 +103,31 @@ function VoiceStageContent({
   // State for UI toggles
   const [isChatOpen, setIsChatOpen] = useState(false);
   const [unreadCount, setUnreadCount] = useState(0);
-  
 
+  // Exit safety prompt for hosts
+  useEffect(() => {
+    const handleBeforeUnload = (e: BeforeUnloadEvent) => {
+      if (userParticipant.role === "host") {
+        e.preventDefault();
+        e.returnValue = "You are the host of this room. Appoint a new host before leaving, or end the room for everyone.";
+        return e.returnValue;
+      }
+    };
+    window.addEventListener("beforeunload", handleBeforeUnload);
+    return () => window.removeEventListener("beforeunload", handleBeforeUnload);
+  }, [userParticipant.role]);
 
-  // Fetch pending requests from DB (for hosts/mods)
+  const handleMinimize = () => {
+    useVoiceStore.getState().setMinimized(true);
+    router.push("/rooms");
+  };
+
+  const handleCopyLink = () => {
+    if (typeof window !== "undefined") {
+      navigator.clipboard.writeText(window.location.href);
+      toast.success("Invite link copied to clipboard!");
+    }
+  };  // Fetch pending requests from DB (for hosts/mods)
   const fetchRequests = useCallback(async () => {
     const isHostOrMod = userParticipant.role === "host" || userParticipant.role === "moderator";
     if (!isHostOrMod) return;
@@ -116,7 +141,6 @@ function VoiceStageContent({
       // Actually, we can fetch all requests by hitting database tables or a helper API.
       // Let's query Supabase directly using client-side query since we want it fast, or write a fetch.
       // Wait! Let's fetch using a direct fetch to database via Supabase client, which is already configured.
-      const { supabase } = await import("@/lib/supabase/client");
       const { data } = await supabase
         .from("speaker_requests")
         .select("*")
@@ -139,7 +163,6 @@ function VoiceStageContent({
     if (userParticipant.role !== "listener") return;
 
     const checkHandRaised = async () => {
-      const { supabase } = await import("@/lib/supabase/client");
       const { data } = await supabase
         .from("speaker_requests")
         .select("id")
@@ -233,6 +256,10 @@ function VoiceStageContent({
     onCapacityUpdated: (updatedMaxSeats) => {
       setMaxSeats(updatedMaxSeats);
       setNewCapacity(updatedMaxSeats);
+      const { activeRoomData, updateRoomData } = useVoiceStore.getState();
+      if (activeRoomData) {
+        updateRoomData({ ...activeRoomData, max_seats: updatedMaxSeats });
+      }
       toast.info(`Speaker capacity extended to ${updatedMaxSeats} seats!`);
     },
     onRoleChanged: (targetGuestId, newRole) => {
@@ -303,12 +330,12 @@ function VoiceStageContent({
 
   const handleUpdateCapacity = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (newCapacity < speakers.length) {
-      toast.error(`Cannot reduce capacity below current speaker count (${speakers.length})`);
+    if (newCapacity < Math.max(8, speakers.length)) {
+      toast.error(`Cannot reduce capacity below ${Math.max(8, speakers.length)} seats.`);
       return;
     }
-    if (newCapacity > 20) {
-      toast.error("Maximum capacity is 20 seats.");
+    if (newCapacity > 16) {
+      toast.error("Maximum capacity is 16 seats.");
       return;
     }
 
@@ -329,11 +356,16 @@ function VoiceStageContent({
       }
 
       setMaxSeats(newCapacity);
+      const { activeRoomData, updateRoomData } = useVoiceStore.getState();
+      if (activeRoomData) {
+        updateRoomData({ ...activeRoomData, max_seats: newCapacity });
+      }
       await broadcastCapacityChange(newCapacity);
       toast.success(`Speaker capacity successfully updated to ${newCapacity} seats!`);
       setIsCapacityOpen(false);
-    } catch (err: any) {
-      toast.error(err.message || "An error occurred");
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : "An error occurred";
+      toast.error(msg);
     } finally {
       setIsUpdatingCapacity(false);
     }
@@ -346,11 +378,14 @@ function VoiceStageContent({
     }
   }, [messages, isMobile]);
 
+  const previousMessageCountRef = useRef(0);
+  
   // Increment unread count if chat is closed
   useEffect(() => {
-    if (!isChatOpen && messages.length > 0) {
-      setUnreadCount((prev) => prev + 1);
+    if (!isChatOpen && messages.length > previousMessageCountRef.current) {
+      setUnreadCount((prev) => prev + (messages.length - previousMessageCountRef.current));
     }
+    previousMessageCountRef.current = messages.length;
   }, [messages, isChatOpen]);
 
   // Reset unread count when opening chat
@@ -404,39 +439,7 @@ function VoiceStageContent({
   // Pending request guest ids to show raised hand icons on listener grid
   const pendingGuestIds = useMemo(() => requests.map((r) => r.guest_id), [requests]);
 
-  // Keep a ref to speakers to prevent resetting the heartbeat interval
-  const speakersRef = useRef(speakers);
-  useEffect(() => {
-    speakersRef.current = speakers;
-  }, [speakers]);
 
-  // Heartbeat presence and activity tracker
-  useEffect(() => {
-    if (connectionState !== "connected") return;
-
-    const sendHeartbeat = async () => {
-      try {
-        const currentSpeakers = speakersRef.current;
-        const isAnyoneSpeaking = currentSpeakers.some(s => s.isMicrophoneEnabled && !s.isMuted);
-
-        await fetch(`/api/rooms/${roomId}/heartbeat`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            guestId,
-            role: userParticipant.role,
-            isSpeaking: isAnyoneSpeaking,
-          }),
-        });
-      } catch (err) {
-        console.error("Failed to send heartbeat:", err);
-      }
-    };
-
-    sendHeartbeat();
-    const interval = setInterval(sendHeartbeat, 30000);
-    return () => clearInterval(interval);
-  }, [roomId, guestId, userParticipant.role, connectionState]);
 
   // Mute a participant (Host only)
   const handleHostMute = async (targetParticipant: any) => {
@@ -493,7 +496,6 @@ function VoiceStageContent({
     try {
       if (hasHandRaised) {
         // Lower hand (Delete from DB)
-        const { supabase } = await import("@/lib/supabase/client");
         await supabase
           .from("speaker_requests")
           .delete()
@@ -534,30 +536,73 @@ function VoiceStageContent({
     }
   };
 
+  const otherParticipants = useMemo(() => {
+    const list: { guestId: string; name: string; emoji: string; role: string }[] = [];
+    allParticipants.forEach((p) => {
+      let role = "listener";
+      let emoji = "🦁";
+      try {
+        if (p.metadata) {
+          const parsed = JSON.parse(p.metadata);
+          role = parsed.role || "listener";
+          emoji = parsed.emoji || "🦁";
+        }
+      } catch {}
+      list.push({
+        guestId: p.identity,
+        name: p.name || "Anonymous",
+        emoji,
+        role,
+      });
+    });
+    return list;
+  }, [allParticipants]);
+
+  const handleTransferAndLeave = async (newHostGuestId: string) => {
+    try {
+      const res = await fetch(`/api/rooms/${roomId}/participants`, {
+        method: "PATCH",
+        headers: {
+          "Content-Type": "application/json",
+          "x-guest-id": guestId || "",
+        },
+        body: JSON.stringify({ targetGuestId: newHostGuestId, role: "host" }),
+      });
+
+      if (!res.ok) {
+        throw new Error("Failed to transfer host role");
+      }
+
+      await useVoiceStore.getState().leaveRoom();
+      setIsTransferOpen(false);
+      toast.success("Host role transferred. You left the room.");
+      router.push("/rooms");
+    } catch (error: unknown) {
+      const msg = error instanceof Error ? error.message : "Host transfer failed";
+      toast.error(msg);
+    }
+  };
+
   // Leave Room
   const handleLeave = async () => {
-    const confirmLeave = window.confirm("Are you sure you want to leave the room?");
-    if (!confirmLeave) return;
+    if (userParticipant.role === "host") {
+      setIsTransferOpen(true);
+    } else {
+      const confirmLeave = window.confirm("Are you sure you want to leave the room?");
+      if (!confirmLeave) return;
 
-    try {
-      await leaveRoom();
-      // Remove from participant list in DB
-      await fetch(`/api/rooms/${roomId}/participants`, {
-        method: "DELETE",
-        headers: { "x-guest-id": guestId },
-      });
-      router.push("/rooms");
-    } catch (error) {
-      router.push("/rooms");
+      try {
+        await useVoiceStore.getState().leaveRoom();
+        router.push("/rooms");
+      } catch {
+        router.push("/rooms");
+      }
     }
   };
 
   // End Room (Host only)
   const handleEndRoom = async () => {
     if (userParticipant.role !== "host") return;
-
-    const confirm = window.confirm("Are you sure you want to end this room for everyone?");
-    if (!confirm) return;
 
     try {
       // 1. Broadcast to other participants that the room has ended
@@ -574,10 +619,13 @@ function VoiceStageContent({
 
       if (!res.ok) throw new Error("Failed to end room");
 
+      await useVoiceStore.getState().leaveRoom();
+      setIsTransferOpen(false);
       toast.success("Room ended");
       router.push("/rooms");
-    } catch (err: any) {
-      toast.error(err.message || "Failed to end room");
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : "Failed to end room";
+      toast.error(msg);
     }
   };
 
@@ -592,15 +640,23 @@ function VoiceStageContent({
         <header className="h-14 border-b border-white/5 bg-background/50 backdrop-blur-md px-4 flex items-center justify-between shrink-0">
           <div className="flex items-center gap-2.5 min-w-0">
             <button
-              onClick={handleLeave}
+              onClick={handleMinimize}
               className="p-1.5 rounded-full hover:bg-white/5 text-muted-foreground hover:text-foreground active-bounce transition duration-200"
+              title="Minimize Room"
             >
               <ArrowLeft className="h-4.5 w-4.5" />
             </button>
             <div className="flex flex-col text-left min-w-0">
-              <h1 className="text-xs font-black text-white truncate">
-                {roomData.name}
-              </h1>
+              <div className="flex items-center gap-1.5">
+                <h1 className="text-xs font-black text-white truncate">
+                  {roomData.name}
+                </h1>
+                {roomData.is_private && (
+                  <span className="bg-amber-500/10 border border-amber-500/20 text-amber-400 px-1 py-0.2 rounded text-[7px] font-black uppercase tracking-wider select-none shrink-0">
+                    🔒 Private
+                  </span>
+                )}
+              </div>
               <p className="text-[9px] text-zinc-500 flex items-center gap-1 mt-0.5 font-semibold truncate">
                 <span>{meta.icon}</span>
                 <span>{roomData.category}</span>
@@ -610,9 +666,53 @@ function VoiceStageContent({
             </div>
           </div>
 
-          <div className="flex items-center gap-1.5 text-[9px] text-zinc-500 font-bold bg-white/5 border border-white/5 px-2 py-0.5 rounded-full">
-            <Users className="h-3 w-3 text-cyan-400" />
-            <span>{allParticipants.length + 1} online</span>
+          <div className="flex items-center gap-2 shrink-0">
+            {userParticipant.role === "host" && (
+              <>
+                {/* Hand Raises */}
+                <button
+                  onClick={() => setIsRequestsOpen(true)}
+                  className="p-1.5 rounded-full hover:bg-white/5 text-zinc-400 hover:text-violet-400 relative active-bounce transition duration-200 cursor-pointer"
+                  title="Speaker Requests"
+                >
+                  <span className="text-sm select-none">🤚</span>
+                  {requests.length > 0 && (
+                    <span className="absolute -top-0.5 -right-0.5 flex h-3.5 w-3.5 items-center justify-center rounded-full bg-violet-600 text-[8px] font-black text-white animate-pulse">
+                      {requests.length}
+                    </span>
+                  )}
+                </button>
+                
+                {/* Extend Seats */}
+                <button
+                  onClick={() => {
+                    setNewCapacity(maxSeats);
+                    setIsCapacityOpen(true);
+                  }}
+                  className="p-1.5 rounded-full hover:bg-white/5 text-zinc-400 hover:text-cyan-400 active-bounce transition duration-200 cursor-pointer"
+                  title="Extend Seats"
+                >
+                  <LayoutGrid className="h-4 w-4" />
+                </button>
+              </>
+            )}
+
+            {/* Copy Link Button */}
+            <button
+              onClick={handleCopyLink}
+              className="p-1.5 rounded-full hover:bg-white/5 text-zinc-400 hover:text-emerald-400 active-bounce transition duration-200 cursor-pointer relative"
+              title="Copy Invite Link"
+            >
+              <Link className="h-4 w-4" />
+              {roomData.is_private && (
+                <span className="absolute -top-0.5 -right-0.5 text-[8px]" title="Private Room">🔒</span>
+              )}
+            </button>
+
+            <div className="flex items-center gap-1.5 text-[9px] text-zinc-500 font-bold bg-white/5 border border-white/5 px-2 py-0.5 rounded-full">
+              <Users className="h-3 w-3 text-cyan-400" />
+              <span>{allParticipants.length + 1} online</span>
+            </div>
           </div>
         </header>
 
@@ -640,6 +740,7 @@ function VoiceStageContent({
               listeners={listeners}
               localIdentity={guestId}
               pendingRequestGuestIds={pendingGuestIds}
+              isMobile={true}
             />
           </div>
 
@@ -782,7 +883,7 @@ function VoiceStageContent({
                 Extend Speaker Seats
               </DialogTitle>
               <DialogDescription className="text-xs text-zinc-400 font-medium">
-                Increase the speaker capacity of this live room (max 20 seats).
+                Increase the speaker capacity of this live room (max 16 seats).
               </DialogDescription>
             </DialogHeader>
             <form onSubmit={handleUpdateCapacity} className="space-y-4 pt-3">
@@ -793,8 +894,8 @@ function VoiceStageContent({
                 <div className="flex items-center gap-4">
                   <input
                     type="range"
-                    min={Math.max(2, speakers.length)}
-                    max={20}
+                    min={Math.max(8, speakers.length)}
+                    max={16}
                     value={newCapacity}
                     onChange={(e) => setNewCapacity(parseInt(e.target.value))}
                     className="flex-1 accent-violet-500 cursor-pointer"
@@ -804,7 +905,7 @@ function VoiceStageContent({
                   </span>
                 </div>
                 <p className="text-[10px] text-zinc-500 font-medium">
-                  Current speakers: {speakers.length}. Max allowed: 20.
+                  Current speakers: {speakers.length}. Allowed range: 8 to 16.
                 </p>
               </div>
               <div className="flex gap-2.5 pt-2">
@@ -842,15 +943,23 @@ function VoiceStageContent({
         <header className="h-16 border-b border-white/5 bg-background/50 backdrop-blur-md px-4 sm:px-6 flex items-center justify-between shrink-0">
           <div className="flex items-center gap-3 min-w-0">
             <button
-              onClick={handleLeave}
+              onClick={handleMinimize}
               className="p-2 -ml-2 rounded-full hover:bg-white/5 text-muted-foreground hover:text-foreground active-bounce transition duration-200"
+              title="Minimize Room"
             >
               <ArrowLeft className="h-5 w-5" />
             </button>
             <div className="flex flex-col text-left min-w-0">
-              <h1 className="text-sm sm:text-base font-black text-foreground truncate">
-                {roomData.name}
-              </h1>
+              <div className="flex items-center gap-2">
+                <h1 className="text-sm sm:text-base font-black text-foreground truncate">
+                  {roomData.name}
+                </h1>
+                {roomData.is_private && (
+                  <span className="bg-amber-500/10 border border-amber-500/20 text-amber-400 px-1.5 py-0.5 rounded-md text-[9px] font-extrabold uppercase tracking-wider select-none shrink-0 flex items-center gap-0.5">
+                    <span>🔒</span> Private
+                  </span>
+                )}
+              </div>
               <p className="text-[10px] text-muted-foreground flex items-center gap-1.5 mt-0.5 font-medium truncate">
                 <span>{meta.icon}</span>
                 <span>{roomData.category}</span>
@@ -861,6 +970,23 @@ function VoiceStageContent({
           </div>
 
           <div className="flex items-center gap-3 text-xs text-muted-foreground font-semibold">
+            <button
+              onClick={handleCopyLink}
+              className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-white/5 border border-white/5 hover:bg-white/10 text-xs text-zinc-300 hover:text-white transition duration-200 active-bounce cursor-pointer"
+              title="Copy Room Link"
+            >
+              <Link className="h-3.5 w-3.5 text-emerald-400" />
+              <span>{roomData.is_private ? "Invite Link" : "Copy Link"}</span>
+            </button>
+
+            <button
+              onClick={handleMinimize}
+              className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-white/5 border border-white/5 hover:bg-white/10 text-xs text-zinc-300 hover:text-white transition duration-200 active-bounce cursor-pointer"
+              title="Minimize Stage"
+            >
+              <Minimize2 className="h-3.5 w-3.5 text-violet-400" />
+              <span>Minimize</span>
+            </button>
             <div className="flex items-center gap-1 bg-white/3 border border-white/5 px-2.5 py-1 rounded-full">
               <Users className="h-3.5 w-3.5 text-cyan-500/80" />
               <span>{allParticipants.length + 1} online</span>
@@ -892,6 +1018,7 @@ function VoiceStageContent({
             listeners={listeners}
             localIdentity={guestId}
             pendingRequestGuestIds={pendingGuestIds}
+            isMobile={false}
           />
         </div>
 
@@ -927,7 +1054,7 @@ function VoiceStageContent({
       </div>
 
       {/* 3. Mobile Slide-Up Drawer Chat */}
-      <Drawer open={isChatOpen && typeof window !== "undefined" && window.innerWidth < 768} onOpenChange={setIsChatOpen}>
+      <Drawer open={isChatOpen && isMobile} onOpenChange={setIsChatOpen}>
         <DrawerContent className="glass-panel text-foreground border-white/10 h-[80vh] p-0 flex flex-col overflow-hidden">
           <DrawerTitle className="sr-only">Room Chat</DrawerTitle>
           <DrawerDescription className="sr-only">Send messages and view chat history in the voice room.</DrawerDescription>
@@ -971,7 +1098,7 @@ function VoiceStageContent({
               Extend Speaker Seats
             </DialogTitle>
             <DialogDescription className="text-xs text-zinc-400 font-medium">
-              Increase the speaker capacity of this live room (max 20 seats).
+              Increase the speaker capacity of this live room (max 16 seats).
             </DialogDescription>
           </DialogHeader>
           <form onSubmit={handleUpdateCapacity} className="space-y-4 pt-3">
@@ -982,8 +1109,8 @@ function VoiceStageContent({
               <div className="flex items-center gap-4">
                 <input
                   type="range"
-                  min={Math.max(2, speakers.length)}
-                  max={20}
+                  min={Math.max(8, speakers.length)}
+                  max={16}
                   value={newCapacity}
                   onChange={(e) => setNewCapacity(parseInt(e.target.value))}
                   className="flex-1 accent-violet-500 cursor-pointer"
@@ -993,7 +1120,7 @@ function VoiceStageContent({
                 </span>
               </div>
               <p className="text-[10px] text-zinc-500 font-medium">
-                Current speakers: {speakers.length}. Max allowed: 20.
+                Current speakers: {speakers.length}. Allowed range: 8 to 16.
               </p>
             </div>
             <div className="flex gap-2.5 pt-2">
@@ -1017,37 +1144,29 @@ function VoiceStageContent({
         </DialogContent>
       </Dialog>
 
-
+      {/* 6. Host exit & transfer options dialog */}
+      <HostTransferDialog
+        isOpen={isTransferOpen}
+        onClose={() => setIsTransferOpen(false)}
+        otherParticipants={otherParticipants}
+        onTransferAndLeave={handleTransferAndLeave}
+        onEndRoom={handleEndRoom}
+      />
     </div>
   );
 }
 
 // Parent VoiceStage that sets up LiveKitRoom connection provider wrapper
 export function VoiceStage({
-  token,
   roomId,
   roomData,
-  initialParticipants,
   userParticipant,
 }: VoiceStageProps) {
-  const livekitUrl = process.env.NEXT_PUBLIC_LIVEKIT_URL;
-
   return (
-    <LiveKitRoom
-      token={token}
-      serverUrl={livekitUrl}
-      connect={true}
-      audio={userParticipant.role !== "listener"} // Auto-join with microphone if speaker/host
-      className="h-full w-full bg-background"
-    >
-      <VoiceStageContent
-        roomId={roomId}
-        roomData={roomData}
-        userParticipant={userParticipant}
-      />
-      
-      {/* LiveKit audio playback element */}
-      <RoomAudioRenderer />
-    </LiveKitRoom>
+    <VoiceStageContent
+      roomId={roomId}
+      roomData={roomData}
+      userParticipant={userParticipant}
+    />
   );
 }

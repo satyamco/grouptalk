@@ -9,24 +9,16 @@ interface ListenerGridProps {
   listeners: (LocalParticipant | RemoteParticipant)[];
   localIdentity: string;
   pendingRequestGuestIds: string[]; // List of guestIds with active raised hands
+  isMobile?: boolean;
 }
 
 export function ListenerGrid({
   listeners,
   localIdentity,
   pendingRequestGuestIds,
+  isMobile = false,
 }: ListenerGridProps) {
-  const [isMobile, setIsMobile] = useState(false);
   const [selectedListener, setSelectedListener] = useState<LocalParticipant | RemoteParticipant | null>(null);
-
-  useEffect(() => {
-    const checkMobile = () => {
-      setIsMobile(window.innerWidth < 768);
-    };
-    checkMobile();
-    window.addEventListener("resize", checkMobile);
-    return () => window.removeEventListener("resize", checkMobile);
-  }, []);
 
   const renderDialog = () => {
     if (!selectedListener) return null;

@@ -5,6 +5,9 @@ import { useDataChannel, useLocalParticipant } from "@livekit/components-react";
 import { ChatMessage, DataChannelEvent } from "@/types";
 import { nanoid } from "nanoid";
 
+const encoder = new TextEncoder();
+const decoder = new TextDecoder();
+
 interface UseChatProps {
   senderName: string;
   senderEmoji: string;
@@ -28,11 +31,27 @@ export function useChat({
 }: UseChatProps) {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const { localParticipant } = useLocalParticipant();
-  const encoder = new TextEncoder();
-  const decoder = new TextDecoder();
   
   // Track processed messages to prevent infinite render loops when callbacks change
   const lastProcessedMessageRef = useRef<any>(null);
+  
+  // Keep refs for callbacks so we don't trigger effect re-runs
+  const callbacks = useRef({
+    onRoleChanged,
+    onParticipantRemoved,
+    onRequestsChanged,
+    onHandRaiseReceived,
+    onRoomEnded,
+    onCapacityUpdated,
+  });
+  callbacks.current = {
+    onRoleChanged,
+    onParticipantRemoved,
+    onRequestsChanged,
+    onHandRaiseReceived,
+    onRoomEnded,
+    onCapacityUpdated,
+  };
 
   // Initialize data channel
   const { send, message: lastReceivedMessage } = useDataChannel("voxroom-events");
@@ -48,6 +67,7 @@ export function useChat({
     try {
       const payloadString = decoder.decode(lastReceivedMessage.payload);
       const event: DataChannelEvent = JSON.parse(payloadString);
+      const cb = callbacks.current;
 
       switch (event.type) {
         case "chat":
@@ -55,35 +75,35 @@ export function useChat({
           break;
 
         case "role-change":
-          if (onRoleChanged) {
-            onRoleChanged(event.data.guestId, event.data.newRole);
+          if (cb.onRoleChanged) {
+            cb.onRoleChanged(event.data.guestId, event.data.newRole);
           }
           break;
 
         case "participant-removed":
-          if (onParticipantRemoved) {
-            onParticipantRemoved(event.data.guestId);
+          if (cb.onParticipantRemoved) {
+            cb.onParticipantRemoved(event.data.guestId);
           }
           break;
 
         case "hand-raise":
-          if (onRequestsChanged) {
-            onRequestsChanged();
+          if (cb.onRequestsChanged) {
+            cb.onRequestsChanged();
           }
-          if (onHandRaiseReceived && event.data.name) {
-            onHandRaiseReceived(event.data.guestId, event.data.name, event.data.emoji);
+          if (cb.onHandRaiseReceived && event.data.name) {
+            cb.onHandRaiseReceived(event.data.guestId, event.data.name, event.data.emoji);
           }
           break;
 
         case "room-ended":
-          if (onRoomEnded) {
-            onRoomEnded(event.data.hostName);
+          if (cb.onRoomEnded) {
+            cb.onRoomEnded(event.data.hostName);
           }
           break;
 
         case "capacity-updated":
-          if (onCapacityUpdated) {
-            onCapacityUpdated(event.data.maxSeats);
+          if (cb.onCapacityUpdated) {
+            cb.onCapacityUpdated(event.data.maxSeats);
           }
           break;
 
@@ -93,7 +113,7 @@ export function useChat({
     } catch (error) {
       console.error("Failed to parse data channel message:", error);
     }
-  }, [lastReceivedMessage, decoder, onRoleChanged, onParticipantRemoved, onRequestsChanged, onHandRaiseReceived, onRoomEnded]);
+  }, [lastReceivedMessage]);
 
   // Send a text message
   const sendMessage = useCallback(
@@ -123,7 +143,7 @@ export function useChat({
         console.error("Failed to send chat message:", error);
       }
     },
-    [send, senderName, senderEmoji, encoder]
+    [send, senderName, senderEmoji]
   );
 
 
@@ -149,7 +169,7 @@ export function useChat({
         console.error("Failed to broadcast role change:", error);
       }
     },
-    [send, encoder]
+    [send]
   );
 
   // Broadcast participant removal (kick, used by host)
@@ -172,7 +192,7 @@ export function useChat({
         console.error("Failed to broadcast participant removal:", error);
       }
     },
-    [send, encoder]
+    [send]
   );
 
   // Broadcast hand raise (used by listener)
@@ -197,7 +217,7 @@ export function useChat({
         console.error("Failed to broadcast hand raise:", error);
       }
     },
-    [send, encoder]
+    [send]
   );
 
   // Broadcast room ended (used by host)
@@ -220,7 +240,7 @@ export function useChat({
         console.error("Failed to broadcast room ended:", error);
       }
     },
-    [send, encoder]
+    [send]
   );
 
   // Broadcast capacity change (used by host)
@@ -243,7 +263,7 @@ export function useChat({
         console.error("Failed to broadcast capacity change:", error);
       }
     },
-    [send, encoder]
+    [send]
   );
 
   return {

@@ -1,20 +1,8 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getSupabaseServer } from "@/lib/supabase/server";
 import { joinRoomSchema } from "@/lib/validators";
-import { RoomServiceClient } from "livekit-server-sdk";
+import { getRoomServiceClient } from "@/lib/room-cleanup";
 import { nanoid } from "nanoid";
-
-const livekitUrl = process.env.NEXT_PUBLIC_LIVEKIT_URL;
-const apiKey = process.env.LIVEKIT_API_KEY;
-const apiSecret = process.env.LIVEKIT_API_SECRET;
-
-function getRoomServiceClient() {
-  if (!livekitUrl || !apiKey || !apiSecret) {
-    throw new Error("LiveKit credentials not configured.");
-  }
-  const httpUrl = livekitUrl.replace(/^ws/, "http");
-  return new RoomServiceClient(httpUrl, apiKey, apiSecret);
-}
 
 // POST /api/rooms/[roomId]/participants - Join a room
 export async function POST(
@@ -110,7 +98,7 @@ export async function PATCH(
       return NextResponse.json({ error: "Missing parameters targetGuestId or role" }, { status: 400 });
     }
 
-    if (!["moderator", "speaker", "listener"].includes(role)) {
+    if (!["host", "moderator", "speaker", "listener"].includes(role)) {
       return NextResponse.json({ error: "Invalid role specified" }, { status: 400 });
     }
 
@@ -119,7 +107,7 @@ export async function PATCH(
     // Verify room host
     const { data: room, error: roomError } = await supabase
       .from("rooms")
-      .select("host_id")
+      .select("*")
       .eq("id", roomId)
       .single();
 
@@ -132,45 +120,135 @@ export async function PATCH(
       return NextResponse.json({ error: "Forbidden: Only the room host can update roles" }, { status: 403 });
     }
 
-    // Get target participant details to retrieve emoji
-    const { data: targetPart } = await supabase
-      .from("participants")
-      .select("emoji")
-      .eq("room_id", roomId)
-      .eq("guest_id", targetGuestId)
-      .maybeSingle();
+    if (role === "host") {
+      // 1. Get target participant details
+      const { data: targetPart, error: targetError } = await supabase
+        .from("participants")
+        .select("name, emoji")
+        .eq("room_id", roomId)
+        .eq("guest_id", targetGuestId)
+        .maybeSingle();
 
-    const targetEmoji = targetPart?.emoji || "🦁";
+      if (targetError || !targetPart) {
+        return NextResponse.json({ error: "Target participant not found in this room" }, { status: 404 });
+      }
 
-    // Update role in database
-    const { error: updateError } = await supabase
-      .from("participants")
-      .update({ role })
-      .eq("room_id", roomId)
-      .eq("guest_id", targetGuestId);
+      // 2. Update room host details in rooms table
+      const { error: roomUpdateError } = await supabase
+        .from("rooms")
+        .update({
+          host_id: targetGuestId,
+          host_name: targetPart.name,
+          host_emoji: targetPart.emoji,
+        })
+        .eq("id", roomId);
 
-    if (updateError) {
-      return NextResponse.json({ error: updateError.message }, { status: 500 });
+      if (roomUpdateError) {
+        return NextResponse.json({ error: roomUpdateError.message }, { status: 500 });
+      }
+
+      // 3. Demote old host to listener in participants table
+      const { error: demoteError } = await supabase
+        .from("participants")
+        .update({ role: "listener" })
+        .eq("room_id", roomId)
+        .eq("guest_id", guestId);
+
+      if (demoteError) {
+        return NextResponse.json({ error: demoteError.message }, { status: 500 });
+      }
+
+      // 4. Promote new host in participants table
+      const { error: promoteError } = await supabase
+        .from("participants")
+        .update({ role: "host" })
+        .eq("room_id", roomId)
+        .eq("guest_id", targetGuestId);
+
+      if (promoteError) {
+        return NextResponse.json({ error: promoteError.message }, { status: 500 });
+      }
+
+      // 5. Update LiveKit permissions for both
+      try {
+        const roomServiceClient = getRoomServiceClient();
+        if (roomServiceClient) {
+          // New host gets host role and publishing rights
+          await roomServiceClient.updateParticipant(roomId, targetGuestId, {
+            permission: {
+              canPublish: true,
+              canSubscribe: true,
+              canPublishData: true,
+            },
+            metadata: JSON.stringify({ emoji: targetPart.emoji, role: "host" }),
+          });
+
+          // Old host gets listener role and gets muted/loses publishing rights
+          const { data: oldHostPart } = await supabase
+            .from("participants")
+            .select("emoji")
+            .eq("room_id", roomId)
+            .eq("guest_id", guestId)
+            .maybeSingle();
+          const oldHostEmoji = oldHostPart?.emoji || "🦁";
+
+          await roomServiceClient.updateParticipant(roomId, guestId, {
+            permission: {
+              canPublish: false,
+              canSubscribe: true,
+              canPublishData: true,
+            },
+            metadata: JSON.stringify({ emoji: oldHostEmoji, role: "listener" }),
+          });
+        }
+      } catch (lkError: any) {
+        console.error("Failed to update LiveKit permissions on host transfer:", lkError);
+      }
+
+      return NextResponse.json({ success: true, targetGuestId, role: "host" });
+    } else {
+      // Get target participant details to retrieve emoji
+      const { data: targetPart } = await supabase
+        .from("participants")
+        .select("emoji")
+        .eq("room_id", roomId)
+        .eq("guest_id", targetGuestId)
+        .maybeSingle();
+
+      const targetEmoji = targetPart?.emoji || "🦁";
+
+      // Update role in database
+      const { error: updateError } = await supabase
+        .from("participants")
+        .update({ role })
+        .eq("room_id", roomId)
+        .eq("guest_id", targetGuestId);
+
+      if (updateError) {
+        return NextResponse.json({ error: updateError.message }, { status: 500 });
+      }
+
+      // Update LiveKit permissions
+      try {
+        const roomServiceClient = getRoomServiceClient();
+        if (roomServiceClient) {
+          const canPublish = role === "moderator" || role === "speaker";
+
+          await roomServiceClient.updateParticipant(roomId, targetGuestId, {
+            permission: {
+              canPublish,
+              canSubscribe: true,
+              canPublishData: true,
+            },
+            metadata: JSON.stringify({ emoji: targetEmoji, role }),
+          });
+        }
+      } catch (lkError: any) {
+        console.error("Failed to update LiveKit permissions on PATCH:", lkError);
+      }
+
+      return NextResponse.json({ success: true, targetGuestId, role });
     }
-
-    // Update LiveKit permissions
-    try {
-      const roomServiceClient = getRoomServiceClient();
-      const canPublish = role === "moderator" || role === "speaker";
-      
-      await roomServiceClient.updateParticipant(roomId, targetGuestId, {
-        permission: {
-          canPublish,
-          canSubscribe: true,
-          canPublishData: true,
-        },
-        metadata: JSON.stringify({ emoji: targetEmoji, role }),
-      });
-    } catch (lkError: any) {
-      console.error("Failed to update LiveKit permissions on PATCH:", lkError);
-    }
-
-    return NextResponse.json({ success: true, targetGuestId, role });
   } catch (error: any) {
     return NextResponse.json({ error: error.message || "Server error" }, { status: 500 });
   }
@@ -235,7 +313,9 @@ export async function DELETE(
     // Disconnect from LiveKit if it's a kick or if we want to ensure clean cleanup
     try {
       const roomServiceClient = getRoomServiceClient();
-      await roomServiceClient.removeParticipant(roomId, finalTargetGuestId);
+      if (roomServiceClient) {
+        await roomServiceClient.removeParticipant(roomId, finalTargetGuestId);
+      }
     } catch (lkError: any) {
       // Ignore if user already disconnected or if credentials are missing
       console.warn("Failed to remove participant from LiveKit:", lkError.message);

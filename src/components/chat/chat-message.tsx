@@ -1,12 +1,13 @@
 "use client";
 
+import { memo } from "react";
 import { ChatMessage } from "@/types";
 
 interface ChatMessageProps {
   message: ChatMessage;
 }
 
-export function ChatMessageItem({ message }: ChatMessageProps) {
+export const ChatMessageItem = memo(function ChatMessageItem({ message }: ChatMessageProps) {
   // Format short time (e.g. "14:45")
   const timeString = new Date(message.createdAt).toLocaleTimeString([], {
     hour: "2-digit",
@@ -36,4 +37,4 @@ export function ChatMessageItem({ message }: ChatMessageProps) {
       </div>
     </div>
   );
-}
+});

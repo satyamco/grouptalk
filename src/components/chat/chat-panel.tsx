@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, memo } from "react";
 import { ChatMessage } from "@/types";
 import { ChatMessageItem } from "./chat-message";
 import { ChatInput } from "./chat-input";
@@ -11,7 +11,7 @@ interface ChatPanelProps {
   onSendMessage: (text: string) => void;
 }
 
-export function ChatPanel({
+export const ChatPanel = memo(function ChatPanel({
   messages,
   onSendMessage,
 }: ChatPanelProps) {
@@ -52,4 +52,4 @@ export function ChatPanel({
       <ChatInput onSendMessage={onSendMessage} />
     </div>
   );
-}
+});

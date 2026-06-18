@@ -4,6 +4,7 @@ import { useEffect, useState, use } from "react";
 import { useRouter } from "next/navigation";
 import { useProfile } from "@/hooks/use-profile";
 import { getGuestId } from "@/hooks/use-guest-id";
+import { useVoiceStore } from "@/hooks/use-voice-store";
 import dynamic from "next/dynamic";
 
 import type { VoiceStageProps } from "@/components/stage/voice-stage";
@@ -12,8 +13,7 @@ const VoiceStage = dynamic<VoiceStageProps>(
   () => import("@/components/stage/voice-stage").then((mod) => mod.VoiceStage),
   { ssr: false }
 );
-import { Room, Participant } from "@/types";
-import { toast } from "sonner";
+import { Participant } from "@/types";
 import { AlertCircle } from "lucide-react";
 import { Button } from "@/components/ui/button";
 
@@ -26,13 +26,17 @@ export default function RoomPage({ params }: RoomPageProps) {
   const { roomId } = use(params);
   
   const { profile, isLoaded: profileLoaded } = useProfile();
+  const {
+    activeRoomId,
+    activeRoomData,
+    userParticipant,
+    token,
+    joinRoom,
+    setMinimized,
+  } = useVoiceStore();
   
-  const [room, setRoom] = useState<Room | null>(null);
-  const [participants, setParticipants] = useState<Participant[]>([]);
-  const [userParticipant, setUserParticipant] = useState<Participant | null>(null);
-  const [token, setToken] = useState<string | null>(null);
-  
-  const [loading, setLoading] = useState(true);
+  const alreadyInRoom = activeRoomId === roomId && !!token;
+  const [loading, setLoading] = useState(!alreadyInRoom);
   const [error, setError] = useState<string | null>(null);
 
   // Core initialization flow
@@ -45,6 +49,12 @@ export default function RoomPage({ params }: RoomPageProps) {
       return;
     }
 
+    // If we are already in this room, just maximize it!
+    if (activeRoomId === roomId && token) {
+      setMinimized(false);
+      return;
+    }
+
     const guestId = getGuestId();
 
     const initializeRoom = async () => {
@@ -54,14 +64,12 @@ export default function RoomPage({ params }: RoomPageProps) {
 
         // 1. Fetch Room Details (metadata + current participants)
         const roomRes = await fetch(`/api/rooms/${roomId}`);
+        const roomJson = await roomRes.json();
         if (!roomRes.ok) {
-          const errData = await roomRes.json();
-          throw new Error(errData.error || "Room not found");
+          throw new Error(roomJson.error || "Room not found");
         }
         
-        const { room: roomData, participants: parts } = await roomRes.json();
-        setRoom(roomData);
-        setParticipants(parts);
+        const roomData = roomJson.room;
 
         // 2. Register Participant (Join Room in Database)
         const joinRes = await fetch(`/api/rooms/${roomId}/participants`, {
@@ -82,7 +90,6 @@ export default function RoomPage({ params }: RoomPageProps) {
         }
 
         const selfParticipant: Participant = await joinRes.json();
-        setUserParticipant(selfParticipant);
 
         // 3. Fetch LiveKit Token
         const tokenRes = await fetch("/api/livekit/token", {
@@ -104,32 +111,21 @@ export default function RoomPage({ params }: RoomPageProps) {
         }
 
         const { token: jwtToken } = await tokenRes.json();
-        setToken(jwtToken);
 
-      } catch (err: any) {
+        // 4. Save to global Zustand store
+        await joinRoom(roomId, roomData, selfParticipant, jwtToken);
+
+      } catch (err: unknown) {
         console.error("Initialization error:", err);
-        setError(err.message || "Failed to join room");
+        const errMessage = err instanceof Error ? err.message : "Failed to join room";
+        setError(errMessage);
       } finally {
         setLoading(false);
       }
     };
 
     initializeRoom();
-  }, [profileLoaded, profile, roomId, router]);
-
-  // Handle cleanup on leave/unload
-  useEffect(() => {
-    return () => {
-      // Only delete non-hosts on unmount to prevent page refresh deactivation of rooms
-      if (profile && room && userParticipant && userParticipant.role !== "host") {
-        const guestId = getGuestId();
-        navigator.sendBeacon(
-          `/api/rooms/${roomId}/participants?guestId=${guestId}`,
-          ""
-        );
-      }
-    };
-  }, [profile, room, roomId, userParticipant]);
+  }, [profileLoaded, profile, roomId, router, activeRoomId, token, joinRoom, setMinimized]);
 
   if (!profileLoaded || loading) {
     return (
@@ -142,7 +138,7 @@ export default function RoomPage({ params }: RoomPageProps) {
     );
   }
 
-  if (error || !room || !userParticipant || !token) {
+  if (error || activeRoomId !== roomId || !activeRoomData || !userParticipant || !token) {
     return (
       <div className="flex min-h-screen flex-col items-center justify-center bg-background p-4 text-center space-y-6">
         <div className="flex h-16 w-16 items-center justify-center rounded-full bg-rose-500/10 border border-rose-500/20 text-rose-400">
@@ -168,8 +164,8 @@ export default function RoomPage({ params }: RoomPageProps) {
     <VoiceStage
       token={token}
       roomId={roomId}
-      roomData={room}
-      initialParticipants={participants}
+      roomData={activeRoomData}
+      initialParticipants={[]}
       userParticipant={userParticipant}
     />
   );
