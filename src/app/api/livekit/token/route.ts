@@ -20,11 +20,13 @@ export async function POST(request: NextRequest) {
     const supabase = getSupabaseServer();
 
     // Verify room is active
-    const { data: room, error: roomError } = await supabase
+    const { data: roomData, error: roomError } = await supabase
       .from("rooms")
       .select("is_active")
       .eq("id", roomId)
       .single();
+
+    const room: any = roomData;
 
     if (roomError || !room) {
       return NextResponse.json({ error: "Room not found" }, { status: 404 });
@@ -35,12 +37,14 @@ export async function POST(request: NextRequest) {
     }
 
     // Query participant's current role in the room
-    const { data: participant, error: partError } = await supabase
+    const { data: participantData, error: partError } = await supabase
       .from("participants")
       .select("role")
       .eq("room_id", roomId)
       .eq("guest_id", guestId)
       .maybeSingle();
+
+    const participant: any = participantData;
 
     // Default to listener if not registered in the participants list yet
     const role = participant ? (participant.role as any) : "listener";

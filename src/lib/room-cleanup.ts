@@ -174,7 +174,7 @@ export async function cleanupInactiveRooms(force = false) {
       .select("room_id")
       .eq("role", "host");
 
-    const roomsWithHosts = new Set(dbHosts?.map((h) => h.room_id) || []);
+    const roomsWithHosts = new Set(dbHosts?.map((h: any) => h.room_id) || []);
 
     // 3. Fetch all active rooms in LiveKit
     const lkRooms = await lkClient.listRooms();

@@ -7,7 +7,9 @@ if (!supabaseUrl || !supabaseAnonKey) {
   console.warn("Warning: NEXT_PUBLIC_SUPABASE_URL or NEXT_PUBLIC_SUPABASE_ANON_KEY is missing in your environment.");
 }
 
-export const supabase = createClient<any, any, any>(
+import { Database } from "./server";
+
+export const supabase: any = createClient<Database>(
   supabaseUrl || "https://placeholder-project.supabase.co",
   supabaseAnonKey || "placeholder-key"
 );
